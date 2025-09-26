@@ -214,73 +214,6 @@ def market_metrics(df: pd.DataFrame, top_n: int):
             "exposure_share": exposure_share, "eff_holdings": eff_holdings}
 
 # ---------------------------- #
-# Backtest-Logik (wöchentlich)
-# ---------------------------- #
-
-def weekly_first_trading_days(idx: pd.DatetimeIndex) -> list:
-    s = pd.Series(1, index=idx)
-    grp = s.groupby(pd.Grouper(freq="W-MON"))
-    return [g.index[0] for _, g in grp if not g.empty]
-
-def run_backtest_weekly(prices, volumes, benchmark, start_date, end_date,
-                        top_n=10, min_volume=5_000_000, max_dd52=-20,
-                        apply_benchmark=True, cost_bps=10.0, slip_bps=5.0):
-    idx = prices.index[(prices.index >= pd.to_datetime(start_date)) & (prices.index <= pd.to_datetime(end_date))]
-    if len(idx) < 260:
-        return pd.DataFrame(), pd.DataFrame()
-    rebal_days = weekly_first_trading_days(idx)
-    if len(rebal_days) < 2:
-        return pd.DataFrame(), pd.DataFrame()
-
-    port_val = 1.0
-    weights_prev = pd.Series(0.0, index=prices.columns)
-    equity, logs = [], []
-    tc = (cost_bps + slip_bps) / 10000.0
-
-    for i in range(len(rebal_days)-1):
-        asof, nxt = rebal_days[i], rebal_days[i+1]
-        p_slice = prices.loc[:asof]
-        v_slice = volumes.loc[:asof] if isinstance(volumes, pd.DataFrame) else pd.DataFrame(index=p_slice.index)
-        bm_slice = None
-        if benchmark is not None:
-            bm_slice = pd.DataFrame({"BM": benchmark.loc[:asof].dropna()})
-            if bm_slice.empty: bm_slice = None
-
-        snap = compute_indicators(p_slice, v_slice, benchmark_df=bm_slice)
-        if snap.empty:
-            equity.append((nxt, port_val))
-            continue
-
-        filt = snap.copy()
-        filt = filt[filt["Ø Volumen (60T)"] >= min_volume]
-        filt = filt[filt["52W-Drawdown (%)"] >= max_dd52]
-        if apply_benchmark and "RS vs Benchmark (%)" in filt.columns:
-            filt = filt[filt["RS vs Benchmark (%)"] > 0]
-        filt = filt.sort_values("Momentum-Score", ascending=False).reset_index(drop=True)
-
-        sel = filt.head(top_n).copy()
-        new_weights = pd.Series(0.0, index=prices.columns)
-        if not sel.empty:
-            w = 1.0 / len(sel)
-            new_weights.loc[sel["Ticker"].values] = w
-
-        rets = prices.loc[asof:nxt].pct_change().fillna(0)
-        gross_return = (rets.iloc[1:] * weights_prev).sum(axis=1).add(1).prod() - 1.0 if len(rets) > 1 else 0.0
-        turnover = float((new_weights - weights_prev).abs().sum())
-        cost = turnover * tc
-        net_return = gross_return - cost
-        port_val *= (1.0 + net_return)
-
-        equity.append((nxt, port_val))
-        logs.append({"Date": asof, "NumHold": int(len(sel)), "Turnover": turnover,
-                     "GrossRet": gross_return, "Cost": cost, "NetRet": net_return, "PortVal": port_val})
-        weights_prev = new_weights.copy()
-
-    eq_df = pd.DataFrame(equity, columns=["Date", "Equity"]).set_index("Date")
-    logs_df = pd.DataFrame(logs)
-    return eq_df, logs_df
-
-# ---------------------------- #
 # Sidebar
 # ---------------------------- #
 
@@ -292,14 +225,12 @@ min_volume = st.sidebar.number_input("Min. Ø Volumen (60T)", min_value=0, value
 max_dd52 = st.sidebar.slider("Max. Drawdown zum 52W-Hoch (%)", -100, 0, -20, step=5)
 apply_benchmark = st.sidebar.checkbox("Nur Aktien > Benchmark (130T)", value=True)
 benchmark_ticker = st.sidebar.text_input("Benchmark-Ticker", "SPY")
-cost_bps = st.sidebar.number_input("Kommission (bps)", min_value=0.0, value=10.0, step=1.0)
-slip_bps = st.sidebar.number_input("Slippage (bps)", min_value=0.0, value=5.0, step=1.0)
 
 # ---------------------------- #
 # Daten laden
 # ---------------------------- #
 
-st.title("📊 Momentum-Analyse v1.1 (mit Kernfiltern + Backtest)")
+st.title("📊 Momentum-Analyse v1.1 (mit Kernfiltern)")
 
 uploaded = st.file_uploader("CSV mit **Ticker** und optional **Name**", type=["csv"])
 tickers_txt = st.text_input("Oder Ticker (kommagetrennt):", "AAPL, MSFT, TSLA, NVDA, META, AVGO")
@@ -358,7 +289,7 @@ metrics = market_metrics(filtered, top_n)
 # Tabs
 # ---------------------------- #
 
-tab1, tab2, tab3 = st.tabs(["🔬 Analyse", "🧭 Handlungsempfehlungen", "📈 Backtest"])
+tab1, tab2 = st.tabs(["🔬 Analyse", "🧭 Handlungsempfehlungen"])
 
 with tab1:
     st.subheader("Analyse – Kennzahlen (gefiltert)")
@@ -372,6 +303,12 @@ with tab2:
         f"**Exposure-Stufen:** {metrics['steps']} • "
         f"**Geplante Holdings:** {metrics['eff_holdings']} (von Top-{top_n})"
     )
+
     rec_df = filtered.copy()
     rec_df["Handlung"] = rec_df.apply(lambda r: rec_row(r, portfolio, top_n=top_n), axis=1)
-    cols = ["Rank", "Ticker", "Name", "Momentum-Score
+
+    cols = ["Rank", "Ticker", "Name", "Momentum-Score", "GD50-Signal", "GD200-Signal", "Handlung"]
+
+    st.dataframe(rec_df[cols], use_container_width=True)
+
+st.caption("Hinweis: Alles nur zu Informations- und Ausbildungszwecken.")
