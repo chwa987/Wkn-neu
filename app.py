@@ -1,6 +1,10 @@
-# app.py – Momentum-RoboAdvisor v1.2.1
+# app.py – Momentum-RoboAdvisor v1.2.1 (überarbeitet)
 # Momentum pur + Marktfilter (Dual Momentum Light)
 # Tabs: Analyse | Handlungsempfehlungen | Backtest
+# Neu:
+# - Analyse-Tab zeigt Name neben Ticker
+# - Handlungsempfehlungen-Tab mit Ampel (🟢/🟡/🔴) + Kauf/Halten/Verkaufen
+# - Anzeige "Anzahl Aktien über GD200" (Count & Quote)
 
 import numpy as np
 import pandas as pd
@@ -191,6 +195,37 @@ def apply_market_filter(bm_prices):
     return last_price >= sma200
 
 # ---------------------------- #
+# Handlungsempfehlung / Ampel
+# ---------------------------- #
+
+def rec_row(row, in_port, top_n=10):
+    t = row["Ticker"]
+    rank = row["Rank"]
+    over50 = row["GD50-Signal"].startswith("Über")
+    over200 = row["GD200-Signal"].startswith("Über")
+
+    if t in in_port:
+        if not over50:
+            return "🔴 Verkaufen (unter GD50)"
+        if rank <= top_n:
+            return "🟡 Halten"
+        return "🔴 Verkaufen (nicht mehr Top)"
+    else:
+        if rank <= top_n and over50 and over200:
+            return "🟢 Kaufen"
+        return "—"
+
+def ampel_symbol(action: str) -> str:
+    if isinstance(action, str):
+        if action.startswith("🟢"):
+            return "🟢"
+        if action.startswith("🟡"):
+            return "🟡"
+        if action.startswith("🔴"):
+            return "🔴"
+    return "—"
+
+# ---------------------------- #
 # Backtest-Logik
 # ---------------------------- #
 
@@ -268,7 +303,7 @@ end_date = st.sidebar.date_input("Enddatum", value=datetime.today())
 
 st.sidebar.markdown("### Filter")
 min_volume = st.sidebar.number_input("Min. Ø Volumen (60T)", min_value=0, value=5_000_000, step=100_000)
-max_dd52 = st.sidebar.slider("Max. Drawdown zum 52W-Hoch (%)", -100, 0, -30, step=5)
+max_dd52 = st.sidebar.slider("Max. Drawdown zum 52W-Hoch (%)", -100, 0, -20, step=5)
 max_volatility = st.sidebar.slider("Max. Volatilität (ann.)", 0.0, 2.0, 1.0, step=0.05)
 apply_benchmark = st.sidebar.checkbox("Nur Aktien > Benchmark (130T)", value=True)
 benchmark_ticker = st.sidebar.text_input("Benchmark-Ticker", "SPY")
@@ -319,8 +354,13 @@ if prices.empty:
 # ---------------------------- #
 
 df = compute_indicators(prices, volumes, benchmark_df=bm_prices)
-df["Name"] = df["Ticker"].map(name_map).fillna(df["Ticker"])
+df["Name"] = df["Ticker"].map(name_map).fillna(df["Ticker"])  # <- Name neben Ticker verfügbar
 market_ok = apply_market_filter(bm_prices)
+
+# Breadth (Über GD200) – Gesamtuniversum & gefiltert
+universe_n_total = len(df)
+breadth_total = int((df["GD200-Signal"] == "Über GD200").sum())
+breadth_share_total = (breadth_total / universe_n_total) if universe_n_total > 0 else 0.0
 
 filtered = df.copy()
 if market_ok:
@@ -334,6 +374,10 @@ if market_ok:
 else:
     filtered = pd.DataFrame()
 
+filtered_n = len(filtered)
+breadth_filt = int((filtered["GD200-Signal"] == "Über GD200").sum()) if filtered_n > 0 else 0
+breadth_share_filt = (breadth_filt / filtered_n) if filtered_n > 0 else 0.0
+
 # ---------------------------- #
 # Tabs
 # ---------------------------- #
@@ -341,19 +385,40 @@ else:
 tab1, tab2, tab3 = st.tabs(["🔬 Analyse", "🧭 Handlungsempfehlungen", "📈 Backtest"])
 
 with tab1:
-    st.subheader("Analyse – Kennzahlen (gefiltert)")
+    st.subheader("Analyse – Kennzahlen")
+    st.markdown(
+        f"**Universum gesamt:** {universe_n_total} • "
+        f"**Über GD200:** {breadth_total}/{universe_n_total} ({breadth_share_total:.0%})"
+        + ("" if filtered.empty else
+           f"  |  **Gefiltert:** {filtered_n} • Über GD200: {breadth_filt}/{filtered_n} ({breadth_share_filt:.0%})")
+    )
     if filtered.empty:
-        st.warning("Keine Werte – Marktfilter aktiv (Benchmark < GD200 → Cash).")
+        st.warning("Keine Werte – Marktfilter aktiv (Benchmark < GD200 → Cash) oder Filter zu streng.")
     else:
-        st.dataframe(filtered, use_container_width=True)
+        # Name direkt neben Ticker
+        show_cols = [
+            "Rank", "Ticker", "Name", "Momentum-Score",
+            "MOM260 (%)", "MOM130 (%)", "RS z-Score",
+            "Ø Volumen (60T)", "52W-Drawdown (%)", "Volatilität (ann.)",
+            "Abstand GD50 (%)", "Abstand GD200 (%)", "GD50-Signal", "GD200-Signal"
+        ]
+        st.dataframe(filtered[show_cols], use_container_width=True)
 
 with tab2:
-    st.subheader("Handlungsempfehlungen")
+    st.subheader("Handlungsempfehlungen (Ampel)")
+    st.markdown(
+        f"**Universum gesamt über GD200:** {breadth_total}/{universe_n_total} ({breadth_share_total:.0%})"
+        + ("" if filtered.empty else
+           f"  |  **Gefiltert über GD200:** {breadth_filt}/{filtered_n} ({breadth_share_filt:.0%})")
+    )
     if filtered.empty:
-        st.info("Aktuell keine Käufe – Marktfilter (Cash).")
+        st.info("Aktuell keine Käufe – Marktfilter (Cash) oder keine Titel nach Filtern.")
     else:
-        cols = ["Rank", "Ticker", "Name", "Momentum-Score", "GD50-Signal", "GD200-Signal"]
-        st.dataframe(filtered[cols], use_container_width=True)
+        rec_df = filtered.copy()
+        rec_df["Handlung"] = rec_df.apply(lambda r: rec_row(r, portfolio, top_n=top_n), axis=1)
+        rec_df["Ampel"] = rec_df["Handlung"].apply(ampel_symbol)
+        cols = ["Ampel", "Rank", "Ticker", "Name", "Momentum-Score", "GD50-Signal", "GD200-Signal", "Handlung"]
+        st.dataframe(rec_df[cols], use_container_width=True)
 
 with tab3:
     st.subheader("Backtest – wöchentlich (mit Marktfilter)")
@@ -379,7 +444,7 @@ with tab3:
                 bm_norm = bm_prices.iloc[:,0].loc[eq_df.index.min():eq_df.index.max()].dropna()
                 if not bm_norm.empty:
                     bm_norm = bm_norm / bm_norm.iloc[0]
-                ax.plot(bm_norm.index, bm_norm.values, label=f"Benchmark ({benchmark_ticker})", alpha=0.8)
+                    ax.plot(bm_norm.index, bm_norm.values, label=f"Benchmark ({benchmark_ticker})", alpha=0.8)
             ax.set_title("Equity-Kurve (wöchentliches Rebalancing mit Marktfilter)")
             ax.grid(True, alpha=0.3)
             ax.legend()
